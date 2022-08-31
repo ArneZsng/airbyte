@@ -4,11 +4,40 @@
 
 package io.airbyte.workers.temporal.check.connection;
 
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+import io.airbyte.workers.temporal.TemporalProxyHelper;
+import io.airbyte.workers.temporal.TemporalUtils;
+import io.micronaut.context.BeanRegistration;
+import io.micronaut.inject.BeanIdentifier;
+import io.temporal.activity.ActivityOptions;
 import io.temporal.testing.WorkflowReplayer;
+import java.time.Duration;
+import java.util.List;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 @SuppressWarnings("PMD.JUnitTestsShouldIncludeAssert")
 class CheckConnectionWorkflowTest {
+
+  private ActivityOptions activityOptions;
+  private TemporalProxyHelper temporalProxyHelper;
+
+  @BeforeEach
+  void setUp() {
+    activityOptions = ActivityOptions.newBuilder()
+        .setScheduleToCloseTimeout(Duration.ofMinutes(5))
+        .setRetryOptions(TemporalUtils.NO_RETRY)
+        .build();
+
+    final BeanIdentifier beanIdentifier = mock(BeanIdentifier.class);
+    final BeanRegistration beanRegistration = mock(BeanRegistration.class);
+    when(beanIdentifier.getName()).thenReturn("checkActivityOptions");
+    when(beanRegistration.getIdentifier()).thenReturn(beanIdentifier);
+    when(beanRegistration.getBean()).thenReturn(activityOptions);
+    temporalProxyHelper = new TemporalProxyHelper(List.of(beanRegistration));
+  }
 
   @Test
   void replayOldWorkflow() throws Exception {
@@ -16,7 +45,8 @@ class CheckConnectionWorkflowTest {
     // This JSON file is exported from Temporal directly (e.g.
     // `http://${temporal-ui}/namespaces/default/workflows/${uuid}/${uuid}/history`) and export
 
-    WorkflowReplayer.replayWorkflowExecutionFromResource("checkWorkflowHistory.json", CheckConnectionWorkflowImpl.class);
+    WorkflowReplayer.replayWorkflowExecutionFromResource("checkWorkflowHistory.json",
+        temporalProxyHelper.proxyWorkflowClass(CheckConnectionWorkflowImpl.class));
   }
 
 }

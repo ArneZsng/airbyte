@@ -4,12 +4,9 @@
 
 package io.airbyte.workers.temporal.sync;
 
-import io.airbyte.config.Configs;
-import io.airbyte.config.EnvConfigs;
 import io.airbyte.config.NormalizationInput;
 import io.airbyte.config.NormalizationSummary;
 import io.airbyte.config.OperatorDbtInput;
-import io.airbyte.config.ResourceRequirements;
 import io.airbyte.config.StandardSyncInput;
 import io.airbyte.config.StandardSyncOperation;
 import io.airbyte.config.StandardSyncOperation.OperatorType;
@@ -17,25 +14,27 @@ import io.airbyte.config.StandardSyncOutput;
 import io.airbyte.protocol.models.ConfiguredAirbyteCatalog;
 import io.airbyte.scheduler.models.IntegrationLauncherConfig;
 import io.airbyte.scheduler.models.JobRunConfig;
-import io.airbyte.workers.temporal.scheduling.shared.ActivityConfiguration;
+import io.airbyte.workers.temporal.annotations.TemporalActivityStub;
 import io.temporal.workflow.Workflow;
 import java.util.UUID;
+import javax.inject.Singleton;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+@Singleton
 public class SyncWorkflowImpl implements SyncWorkflow {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(SyncWorkflowImpl.class);
   private static final String VERSION_LABEL = "sync-workflow";
   private static final int CURRENT_VERSION = 1;
-  private final ReplicationActivity replicationActivity =
-      Workflow.newActivityStub(ReplicationActivity.class, ActivityConfiguration.LONG_RUN_OPTIONS);
-  private final NormalizationActivity normalizationActivity =
-      Workflow.newActivityStub(NormalizationActivity.class, ActivityConfiguration.LONG_RUN_OPTIONS);
-  private final DbtTransformationActivity dbtTransformationActivity =
-      Workflow.newActivityStub(DbtTransformationActivity.class, ActivityConfiguration.LONG_RUN_OPTIONS);
-  private final PersistStateActivity persistActivity =
-      Workflow.newActivityStub(PersistStateActivity.class, ActivityConfiguration.SHORT_ACTIVITY_OPTIONS);
+  @TemporalActivityStub(activityOptionsBeanName = "longRunActivityOptions")
+  private ReplicationActivity replicationActivity;
+  @TemporalActivityStub(activityOptionsBeanName = "longRunActivityOptions")
+  private NormalizationActivity normalizationActivity;
+  @TemporalActivityStub(activityOptionsBeanName = "longRunActivityOptions")
+  private DbtTransformationActivity dbtTransformationActivity;
+  @TemporalActivityStub(activityOptionsBeanName = "shortActivityOptions")
+  private PersistStateActivity persistActivity;
 
   @Override
   public StandardSyncOutput run(final JobRunConfig jobRunConfig,
@@ -58,8 +57,7 @@ public class SyncWorkflowImpl implements SyncWorkflow {
     if (syncInput.getOperationSequence() != null && !syncInput.getOperationSequence().isEmpty()) {
       for (final StandardSyncOperation standardSyncOperation : syncInput.getOperationSequence()) {
         if (standardSyncOperation.getOperatorType() == OperatorType.NORMALIZATION) {
-          final Configs configs = new EnvConfigs();
-          final NormalizationInput normalizationInput = generateNormalizationInput(syncInput, syncOutput, configs);
+          final NormalizationInput normalizationInput = generateNormalizationInput(syncInput, syncOutput);
           final NormalizationSummary normalizationSummary =
               normalizationActivity.normalize(jobRunConfig, destinationLauncherConfig, normalizationInput);
           syncOutput = syncOutput.withNormalizationSummary(normalizationSummary);
@@ -81,18 +79,9 @@ public class SyncWorkflowImpl implements SyncWorkflow {
   }
 
   private NormalizationInput generateNormalizationInput(final StandardSyncInput syncInput,
-                                                        final StandardSyncOutput syncOutput,
-                                                        final Configs configs) {
-    final ResourceRequirements resourceReqs = new ResourceRequirements()
-        .withCpuRequest(configs.getNormalizationJobMainContainerCpuRequest())
-        .withCpuLimit(configs.getNormalizationJobMainContainerCpuLimit())
-        .withMemoryRequest(configs.getNormalizationJobMainContainerMemoryRequest())
-        .withMemoryLimit(configs.getNormalizationJobMainContainerMemoryLimit());
+                                                        final StandardSyncOutput syncOutput) {
 
-    return new NormalizationInput()
-        .withDestinationConfiguration(syncInput.getDestinationConfiguration())
-        .withCatalog(syncOutput.getOutputCatalog())
-        .withResourceRequirements(resourceReqs);
+    return normalizationActivity.generateNormalizationInput(syncInput, syncOutput);
   }
 
 }

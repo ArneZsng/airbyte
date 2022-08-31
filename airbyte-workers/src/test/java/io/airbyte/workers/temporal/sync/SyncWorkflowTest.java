@@ -2,16 +2,18 @@
  * Copyright (c) 2022 Airbyte, Inc., all rights reserved.
  */
 
-package io.airbyte.workers.temporal;
+package io.airbyte.workers.temporal.sync;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 import io.airbyte.config.NormalizationInput;
 import io.airbyte.config.NormalizationSummary;
@@ -24,24 +26,24 @@ import io.airbyte.protocol.models.ConfiguredAirbyteCatalog;
 import io.airbyte.scheduler.models.IntegrationLauncherConfig;
 import io.airbyte.scheduler.models.JobRunConfig;
 import io.airbyte.workers.TestConfigHelpers;
-import io.airbyte.workers.temporal.sync.DbtTransformationActivity;
-import io.airbyte.workers.temporal.sync.DbtTransformationActivityImpl;
-import io.airbyte.workers.temporal.sync.NormalizationActivity;
-import io.airbyte.workers.temporal.sync.NormalizationActivityImpl;
-import io.airbyte.workers.temporal.sync.PersistStateActivity;
-import io.airbyte.workers.temporal.sync.PersistStateActivityImpl;
-import io.airbyte.workers.temporal.sync.ReplicationActivity;
-import io.airbyte.workers.temporal.sync.ReplicationActivityImpl;
-import io.airbyte.workers.temporal.sync.SyncWorkflow;
-import io.airbyte.workers.temporal.sync.SyncWorkflowImpl;
+import io.airbyte.workers.temporal.TemporalJobType;
+import io.airbyte.workers.temporal.TemporalProxyHelper;
+import io.airbyte.workers.temporal.TemporalUtils;
+import io.micronaut.context.BeanRegistration;
+import io.micronaut.inject.BeanIdentifier;
+import io.temporal.activity.ActivityCancellationType;
+import io.temporal.activity.ActivityOptions;
 import io.temporal.api.common.v1.WorkflowExecution;
 import io.temporal.api.workflowservice.v1.RequestCancelWorkflowExecutionRequest;
 import io.temporal.api.workflowservice.v1.WorkflowServiceGrpc.WorkflowServiceBlockingStub;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowFailedException;
 import io.temporal.client.WorkflowOptions;
+import io.temporal.common.RetryOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
+import java.time.Duration;
+import java.util.List;
 import org.apache.commons.lang3.tuple.ImmutablePair;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -80,15 +82,15 @@ class SyncWorkflowTest {
   private StandardSyncInput syncInput;
   private NormalizationInput normalizationInput;
   private OperatorDbtInput operatorDbtInput;
-
   private StandardSyncOutput replicationSuccessOutput;
   private NormalizationSummary normalizationSummary;
+  private ActivityOptions longActivityOptions;
+  private ActivityOptions shortActivityOptions;
+  private TemporalProxyHelper temporalProxyHelper;
 
   @BeforeEach
-  public void setUp() {
+  void setUp() {
     testEnv = TestWorkflowEnvironment.newInstance();
-    syncWorker = testEnv.newWorker(TemporalJobType.SYNC.name());
-    syncWorker.registerWorkflowImplementationTypes(SyncWorkflowImpl.class);
 
     client = testEnv.getWorkflowClient();
 
@@ -111,6 +113,41 @@ class SyncWorkflowTest {
     normalizationActivity = mock(NormalizationActivityImpl.class);
     dbtTransformationActivity = mock(DbtTransformationActivityImpl.class);
     persistStateActivity = mock(PersistStateActivityImpl.class);
+
+    when(normalizationActivity.generateNormalizationInput(any(), any())).thenReturn(normalizationInput);
+
+    longActivityOptions = ActivityOptions.newBuilder()
+        .setScheduleToCloseTimeout(Duration.ofDays(3))
+        .setStartToCloseTimeout(Duration.ofDays(3))
+        .setScheduleToStartTimeout(Duration.ofDays(3))
+        .setCancellationType(ActivityCancellationType.WAIT_CANCELLATION_COMPLETED)
+        .setRetryOptions(TemporalUtils.NO_RETRY)
+        .setHeartbeatTimeout(TemporalUtils.HEARTBEAT_TIMEOUT)
+        .build();
+    shortActivityOptions = ActivityOptions.newBuilder()
+        .setStartToCloseTimeout(Duration.ofSeconds(120))
+        .setRetryOptions(RetryOptions.newBuilder()
+            .setMaximumAttempts(5)
+            .setInitialInterval(Duration.ofSeconds(30))
+            .setMaximumInterval(Duration.ofSeconds(600))
+            .build())
+        .build();
+
+    final BeanIdentifier longActivitiesBeanIdentifier = mock(BeanIdentifier.class);
+    final BeanRegistration longActivityOptionsBeanRegistration = mock(BeanRegistration.class);
+    when(longActivitiesBeanIdentifier.getName()).thenReturn("longRunActivityOptions");
+    when(longActivityOptionsBeanRegistration.getIdentifier()).thenReturn(longActivitiesBeanIdentifier);
+    when(longActivityOptionsBeanRegistration.getBean()).thenReturn(longActivityOptions);
+    final BeanIdentifier shortActivitiesBeanIdentifier = mock(BeanIdentifier.class);
+    final BeanRegistration shortActivityOptionsBeanRegistration = mock(BeanRegistration.class);
+    when(shortActivitiesBeanIdentifier.getName()).thenReturn("shortActivityOptions");
+    when(shortActivityOptionsBeanRegistration.getIdentifier()).thenReturn(shortActivitiesBeanIdentifier);
+    when(shortActivityOptionsBeanRegistration.getBean()).thenReturn(shortActivityOptions);
+    temporalProxyHelper = new TemporalProxyHelper(List.of(longActivityOptionsBeanRegistration, shortActivityOptionsBeanRegistration));
+
+    syncWorker = testEnv.newWorker(TemporalJobType.SYNC.name());
+    syncWorker.registerWorkflowImplementationTypes(temporalProxyHelper.proxyWorkflowClass(SyncWorkflowImpl.class));
+
   }
 
   // bundle up all the temporal worker setup / execution into one method.
